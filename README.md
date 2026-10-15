@@ -1,13 +1,18 @@
 # CNN 程序（PyTorch 主程序 + 纯 NumPy 从零实现）
 
+> **更新（已装上 torch 后实测）**：PyTorch 版已在真实 MNIST 上跑通，5 个 epoch
+> 达到 **测试准确率 99.53%**（CPU 约 4.7 分钟）。详见文末「实测记录」。
+
 本目录是一套可直接运行的卷积神经网络程序，包含两个版本：
 
-| 文件 | 说明 | 本机状态 |
+| 文件 | 说明 | 状态 |
 | --- | --- | --- |
-| `cnn_mnist_torch.py` | **主交付**：PyTorch CNN，训练真实 MNIST（28×28，10 类） | 本机未安装 torch，**未实际运行**（代码已静态校验 + 结构推演验证） |
-| `cnn_numpy.py` | 纯 NumPy 从零实现 CNN（卷积/池化/反向传播全手写），自带程序化数字数据集，**无需联网、无需 torch** | **已实际跑通**，测试集准确率 97.0% |
-| `smoke_test.py` | NumPy 版自检：形状、池化边界、数值梯度校验、过拟合测试、短训练 | 已跑通，12 项全部通过 |
-| `verify_torch_arch.py` | 无需 torch 也能验证 `cnn_mnist_torch.py` 的网络结构维度是否自洽 | 已跑通，13 项全部通过 |
+| `cnn_mnist_torch.py` | **主交付**：PyTorch CNN，训练真实 MNIST（28×28，10 类） | **已跑通，测试准确率 99.53%** |
+| `cnn_numpy.py` | 纯 NumPy 从零实现 CNN（卷积/池化/反向传播全手写），自带程序化数字数据集，无需联网、无需 torch | 已跑通，合成数据 97.0%~99.7% |
+| `predict_my_digit.py` | **推理脚本**：识别你自己手写的数字（自动反相/裁剪/质心居中） | 已跑通，真实 MNIST 图 5/5 全对 |
+| `make_test_images.py` | 从 MNIST 测试集导出 PNG，用于测试推理脚本 | 已跑通 |
+| `smoke_test.py` | NumPy 版自检：形状、池化边界、数值梯度校验、过拟合测试、短训练 | 12 项全部通过 |
+| `verify_torch_arch.py` | 无需 torch 也能验证 `cnn_mnist_torch.py` 的网络结构维度是否自洽 | 13 项全部通过 |
 
 ---
 
@@ -35,8 +40,42 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 python cnn_mnist_torch.py                          # 默认训练 5 个 epoch
 python cnn_mnist_torch.py --epochs 10 --device cuda
 python cnn_mnist_torch.py --patience 3             # 验证集 3 个 epoch 不提升就早停
+python cnn_mnist_torch.py --no-augment             # 关掉随机增强（对比用）
 python cnn_mnist_torch.py --eval-only --ckpt outputs/mnist_cnn.pt
 ```
+
+### 实测记录（真实 MNIST，CPU）
+
+环境：`torch 2.14.1+cpu`、`torchvision 0.29.1`、Python 3.10.2、`--workers 0`
+
+```
+设备: cpu | torch 2.14.1+cpu
+数据来源: torchvision | 训练样本 60000 | 测试样本 10000
+增强: 开 | 标签平滑: 0.05
+模型参数量: 140,522
+epoch  1/5 | train loss 0.5834 acc 0.9140 | val loss 0.0766 acc 0.9863 | lr 9.05e-04 | 60.1s  *saved*
+epoch  2/5 | train loss 0.3982 acc 0.9787 | val loss 0.0732 acc 0.9921 | lr 6.55e-04 | 57.9s  *saved*
+epoch  3/5 | train loss 0.3756 acc 0.9844 | val loss 0.0514 acc 0.9940 | lr 3.45e-04 | 55.8s  *saved*
+epoch  4/5 | train loss 0.3636 acc 0.9873 | val loss 0.0494 acc 0.9946 | lr 9.55e-05 | 55.2s  *saved*
+epoch  5/5 | train loss 0.3556 acc 0.9895 | val loss 0.0478 acc 0.9953 | lr 0.00e+00 | 55.4s  *saved*
+
+最佳验证准确率: 0.9953 | 权重: outputs/mnist_cnn.pt
+测试集: loss 0.0478 | 准确率 0.9953
+
+各类别准确率:
+  0: 1.0000 (n=980)    1: 0.9956 (n=1135)   2: 0.9971 (n=1032)
+  3: 0.9960 (n=1010)   4: 0.9969 (n=982)    5: 0.9933 (n=892)
+  6: 0.9906 (n=958)    7: 0.9971 (n=1028)   8: 0.9969 (n=974)
+  9: 0.9891 (n=1009)
+```
+
+**它错在哪**：`outputs/torch_errors.png` 里全是"鬼画符"级别的样本
+（写成 `β` 形的 8、糊成一团的 7、缺笔画的 2），没有把清清楚楚的数字认错。
+这正是模型健康、99.53% 可信的证据。
+
+**与 NumPy 字体版的对比**：同一个「写成 S 形的 5」，
+字体版模型以 92.2% 的置信度认成 **8**，真实 MNIST 版以 98.7% 认成 **5**。
+这就是"训练数据分布是否匹配"的差别。
 
 ### 网络结构
 
@@ -53,7 +92,7 @@ python cnn_mnist_torch.py --eval-only --ckpt outputs/mnist_cnn.pt
   Linear(128→10)
 ```
 
-参数量约 **140,330**，在真实 MNIST 上正常可达到 **99.3%+** 测试准确率。
+参数量 **140,522**（实测），在真实 MNIST 上实测达到 **99.53%** 测试准确率。
 
 ### 训练技巧（代码里已实现）
 
@@ -197,8 +236,40 @@ test = datasets.ImageFolder("mydata/val", transform=transforms.Compose([
 
 ---
 
-## 4. 环境说明
+## 4. 识别你自己的手写数字
 
-- Python：本机验证使用 DSH 捆绑的 CPython 3.12（`numpy 2.3.5` + `Pillow 12.3.0`）
-- `cnn_numpy.py` / `smoke_test.py` / `verify_torch_arch.py` 只依赖 `numpy` 和 `Pillow`
-- `cnn_mnist_torch.py` 需要 `torch` + `torchvision`（本机无法安装：pip 走不通 HTTPS）
+训练准确率高不代表对**你的**字也准——这是最值得亲手做的验证。
+
+```bash
+python predict_my_digit.py my_digit.png                    # 认一张
+python predict_my_digit.py a.png b.png --topk 3            # 多张 + 显示前 3 候选
+python predict_my_digit.py my_digit.png --save-preview     # 存一张可视化预览图
+python make_test_images.py --count 5                       # 从 MNIST 导出图片来试
+```
+
+脚本会自动处理这两件最容易让模型翻车的事：
+
+- **自动反相**：MNIST 是黑底白字，而照片/画图软件通常是白底黑字（用四周边框亮度判断背景）
+- **质心居中**：先裁掉空白边，再等比缩放到 20×20，最后按亮度质心对齐到 28×28 画布
+
+手动控制：`--invert yes/no/auto`、`--no-center`。置信度低于 50% 时脚本会主动提示
+「模型很犹豫」，多半是图片太模糊或笔迹风格差异过大。
+
+实测（用 `outputs/mnist_cnn.pt` 识别从 MNIST 导出的 5 张图，含那张 S 形的 5）：
+
+```
+digit_4_0.png -> 4 (98.4%)    digit_7_1.png -> 7 (96.6%)
+digit_5_2.png -> 5 (98.7%)    digit_3_3.png -> 3 (96.7%)
+digit_5_4.png -> 5 (90.4%)                          5/5 全对
+```
+
+---
+
+## 5. 环境说明
+
+- 实测环境：Python 3.10.2 + `torch 2.14.1+cpu` + `torchvision 0.29.1` + `numpy` + `Pillow`
+- `cnn_numpy.py` / `smoke_test.py` / `verify_torch_arch.py` 只需 `numpy` + `Pillow`
+- `cnn_mnist_torch.py` / `predict_my_digit.py` 需要 `torch`（`predict_my_digit.py`
+  也能读 NumPy 版权重 `outputs/numpy_cnn.npz`，自动选择）
+- MNIST 数据在首次运行时由 torchvision 自动下载到 `data/MNIST/raw/`（约 11 MB）
+- CPU 训练 5 epoch 约 5 分钟；有 NVIDIA 显卡可加 `--device cuda`，通常 1 分钟内

@@ -38,9 +38,18 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 try:
+    from torchvision import datasets, transforms
+except ImportError:  # 没装 torchvision 时走内置 IDX 读取器
+    datasets = None
+    transforms = None
+
+try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:  # pragma: no cover
     Image = ImageDraw = ImageFont = None
+
+# MNIST 全局均值/标准差（业界通用值），供标准化与可视化复用
+MNIST_MEAN, MNIST_STD = 0.1307, 0.3081
 
 
 # ------------------------------------------------------------------------------
@@ -93,39 +102,50 @@ IDX_FILES = {
 
 
 class ArrayDataset(Dataset):
-    """把 (N,1,28,28) float32 的张量包成 Dataset，方便统一用 DataLoader。"""
+    """把 (N,1,28,28) float32 的数组包成 Dataset（label 可以是 list 或 ndarray）。"""
 
-    def __init__(self, images: np.ndarray, labels: np.ndarray, augment: bool = False):
-        self.images = torch.from_numpy(images).float()
-        self.labels = torch.from_numpy(labels).long()
-        self.augment = augment
+    def __init__(self, images: np.ndarray, labels, transform=None):
+        self.images = torch.from_numpy(np.asarray(images)).float()
+        self.labels = torch.from_numpy(np.asarray(labels)).long()
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.labels)
 
     def __getitem__(self, i: int):
         img, label = self.images[i], self.labels[i]
-        if self.augment:
-            img = augment_image(img)
+        if self.transform is not None:
+            img = self.transform(img)
         return img, label
 
 
 def augment_image(img: torch.Tensor) -> torch.Tensor:
-    """随机小角度旋转 + 随机平移（用 affine_grid 实现，纯张量操作）。"""
+    """
+    随机小角度旋转 + 随机平移（affine_grid + grid_sample）。
+    同时兼容 (C,H,W) 和 (B,C,H,W)：grid_sample 在 torch 2.x 对维度校验很严格，
+    所以这里显式保证网格与输入都是 4D。
+    """
+    squeeze = img.dim() == 3
+    x = img.unsqueeze(0) if squeeze else img
+    if x.dim() != 4:
+        raise ValueError(f"augment_image 需要 3D 或 4D 输入，收到 {tuple(img.shape)}")
+
     angle = float(torch.empty(1).uniform_(-12, 12)) * 3.14159265 / 180
     max_shift = 0.10
     tx = float(torch.empty(1).uniform_(-max_shift, max_shift))
     ty = float(torch.empty(1).uniform_(-max_shift, max_shift))
 
     cos, sin = float(torch.cos(torch.tensor(angle))), float(torch.sin(torch.tensor(angle)))
-    theta = torch.tensor([[[cos, -sin, tx], [sin, cos, ty]]], dtype=torch.float32)
-    grid = F.affine_grid(theta, (1, 1, 28, 28), align_corners=False)
-    out = F.grid_sample(img.unsqueeze(0), grid, align_corners=False).squeeze(0)
-    return out.clamp(0.0, 1.0)
+    theta = torch.tensor([[[cos, -sin, tx], [sin, cos, ty]]],
+                         dtype=x.dtype, device=x.device).expand(x.size(0), 2, 3)
+    grid = F.affine_grid(theta, list(x.shape), align_corners=False)
+    out = F.grid_sample(x, grid, align_corners=False)
+    return out.squeeze(0) if squeeze else out
 
 
-def normalize_batch(x: torch.Tensor, mean: float = 0.1307, std: float = 0.3081) -> torch.Tensor:
-    return (x - mean) / std
+def to_display(img: torch.Tensor, mean: float = MNIST_MEAN, std: float = MNIST_STD) -> torch.Tensor:
+    """反标准化，把张量还原成 0~1 的灰度图，便于可视化。"""
+    return (img * std + mean).clamp(0.0, 1.0)
 
 
 def find_idx_dir(root: str = "data") -> str | None:
@@ -158,19 +178,39 @@ def load_idx_data(directory: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
     return xtr[:, None], ytr, xte[:, None], yte
 
 
-def load_mnist(root: str = "data", download: bool = True):
+def make_train_transform(augment: bool = True):
     """
-    返回 (train_ds, test_ds, source)。
-    优先使用 torchvision（会自动下载到 root/MNIST/raw），否则读本地 IDX 文件。
+    标准数据管线：ToTensor -> (随机仿射增强) -> Normalize。
+    放在 transform 里而不是训练循环里，配合 DataLoader 的多进程更高效。
+    """
+    steps: list = [transforms.ToTensor()]
+    if augment:
+        steps.append(transforms.Lambda(augment_image))
+    steps.append(transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)))
+    return transforms.Compose(steps)
+
+
+def make_eval_transform():
+    return transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+    ])
+
+
+def load_mnist(root: str = "data", download: bool = True, augment: bool = True):
+    """
+    返回 (train_ds, test_ds, source)。返回的数据集**已经带好 transform**，
+    即 DataLoader 直接吐出来的就是标准化后的张量；augment 控制训练集是否做随机增强。
     """
     idx_dir = find_idx_dir(root)
 
     try:
-        from torchvision import datasets, transforms  # type: ignore
+        from torchvision import datasets, transforms  # noqa: F401
 
-        tf = transforms.ToTensor()
-        train = datasets.MNIST(root, train=True, download=download and idx_dir is None, transform=tf)
-        test = datasets.MNIST(root, train=False, download=download and idx_dir is None, transform=tf)
+        train = datasets.MNIST(root, train=True, download=download and idx_dir is None,
+                               transform=make_train_transform(augment))
+        test = datasets.MNIST(root, train=False, download=download and idx_dir is None,
+                              transform=make_eval_transform())
         return train, test, "torchvision"
     except ImportError:
         print("[info] 未安装 torchvision，改用内置 IDX 读取器", file=sys.stderr)
@@ -187,7 +227,9 @@ def load_mnist(root: str = "data", download: bool = True):
             "  3) 先运行 python cnn_numpy.py（无需任何下载的离线版本）"
         )
     xtr, ytr, xte, yte = load_idx_data(idx_dir)
-    return ArrayDataset(xtr, ytr, augment=False), ArrayDataset(xte, yte), f"idx:{idx_dir}"
+    tr = ArrayDataset(xtr, ytr, transform=make_train_transform(augment))
+    te = ArrayDataset(xte, yte, transform=make_eval_transform())
+    return tr, te, f"idx:{idx_dir}"
 
 
 # ------------------------------------------------------------------------------
@@ -226,16 +268,17 @@ def load_checkpoint(path: str, device: torch.device) -> dict:
 
 
 def run_epoch(model: nn.Module, loader: DataLoader, device: torch.device, optimizer=None,
-              mean: float = 0.1307, std: float = 0.3081) -> tuple[float, float]:
+              label_smoothing: float = 0.0) -> tuple[float, float]:
+    """跑一轮。数据已由 transform 完成标准化，这里不再重复处理。"""
     train = optimizer is not None
     model.train(train)
     total_loss, correct, seen = 0.0, 0, 0
     with torch.set_grad_enabled(train):
         for x, y in loader:
-            x = normalize_batch(x.to(device, non_blocking=True), mean, std)
+            x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             logits = model(x)
-            loss = F.cross_entropy(logits, y, label_smoothing=0.05 if train else 0.0)
+            loss = F.cross_entropy(logits, y, label_smoothing=label_smoothing if train else 0.0)
             if train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -247,14 +290,14 @@ def run_epoch(model: nn.Module, loader: DataLoader, device: torch.device, optimi
     return total_loss / seen, correct / seen
 
 
-def evaluate_full(model: nn.Module, loader: DataLoader, device: torch.device,
-                  mean: float = 0.1307, std: float = 0.3081) -> tuple[float, np.ndarray, np.ndarray]:
+def evaluate_full(model: nn.Module, loader: DataLoader,
+                  device: torch.device) -> tuple[float, np.ndarray, np.ndarray]:
+    """完整评估，返回 (loss, 预测, 真实标签)。"""
     model.eval()
     losses, preds, targets = [], [], []
     with torch.no_grad():
         for x, y in loader:
-            x = normalize_batch(x.to(device), mean, std)
-            logits = model(x)
+            logits = model(x.to(device))
             losses.append(float(F.cross_entropy(logits, y.to(device)).item()) * len(y))
             preds.append(logits.argmax(1).cpu().numpy())
             targets.append(y.numpy())
@@ -266,19 +309,10 @@ def train(args) -> History:
     device = pick_device(args.device)
     print(f"设备: {device} | torch {torch.__version__}")
 
-    train_ds, test_ds, source = load_mnist(args.data, download=not args.no_download)
+    train_ds, test_ds, source = load_mnist(args.data, download=not args.no_download,
+                                           augment=not args.no_augment)
     print(f"数据来源: {source} | 训练样本 {len(train_ds)} | 测试样本 {len(test_ds)}")
-
-    # torchvision 的 Dataset 需要手动包一层增强
-    if source == "torchvision":
-        images = torch.stack([train_ds[i][0] for i in range(len(train_ds))])
-        labels = torch.tensor([train_ds[i][1] for i in range(len(train_ds))])
-        train_ds = ArrayDataset(images.squeeze(1).numpy(), labels.numpy(), augment=True)
-        test_ds = ArrayDataset(
-            torch.stack([test_ds[i][0] for i in range(len(test_ds))]).squeeze(1).numpy(),
-            np.array([test_ds[i][1] for i in range(len(test_ds))]),
-            augment=False,
-        )
+    print(f"增强: {'关' if args.no_augment else '开'} | 标签平滑: {args.label_smoothing}")
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -299,7 +333,8 @@ def train(args) -> History:
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        tr_loss, tr_acc = run_epoch(model, train_loader, device, optimizer)
+        tr_loss, tr_acc = run_epoch(model, train_loader, device, optimizer,
+                                    label_smoothing=args.label_smoothing)
         val_loss, val_acc = run_epoch(model, test_loader, device, None)
         scheduler.step()
 
@@ -391,7 +426,8 @@ def save_history_plot(hist: History, path: str) -> None:
 
 
 def _tile(tensor: torch.Tensor, size: int) -> "Image.Image":
-    arr = (tensor.squeeze().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    """tensor 是标准化后的 (1,28,28)，先反标准化再转成图片。"""
+    arr = (to_display(tensor.squeeze().cpu()) * 255).numpy().clip(0, 255).astype(np.uint8)
     return Image.fromarray(arr).resize((size, size), Image.NEAREST).convert("RGB")
 
 
@@ -402,7 +438,7 @@ def save_prediction_grid(model: nn.Module, loader: DataLoader, device: torch.dev
     model.eval()
     xs, ys = next(iter(loader))
     with torch.no_grad():
-        pred = model(normalize_batch(xs.to(device))).argmax(1).cpu()
+        pred = model(xs.to(device)).argmax(1).cpu()
     n = min(cols * rows, len(xs))
     cell, pad = 84, 6
     img = Image.new("RGB", (cols * (cell + pad) + pad, rows * (cell + pad + 18) + pad), "white")
@@ -427,7 +463,7 @@ def save_error_examples(model: nn.Module, loader: DataLoader, device: torch.devi
     wrong_x, wrong_p, wrong_t = [], [], []
     with torch.no_grad():
         for x, y in loader:
-            pred = model(normalize_batch(x.to(device))).argmax(1).cpu()
+            pred = model(x.to(device)).argmax(1).cpu()
             bad = pred != y
             wrong_x.append(x[bad])
             wrong_p.append(pred[bad])
@@ -490,11 +526,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--dropout", type=float, default=0.3)
+    p.add_argument("--label-smoothing", type=float, default=0.05, help="标签平滑系数（0=关闭）")
+    p.add_argument("--no-augment", action="store_true", help="关闭训练集随机旋转/平移增强")
     p.add_argument("--patience", type=int, default=0, help="连续 N 个 epoch 无提升则早停（0=关闭）")
     p.add_argument("--device", type=str, default="auto", help="auto / cpu / cuda / mps")
     p.add_argument("--data", type=str, default="data", help="MNIST 数据目录")
     p.add_argument("--outdir", type=str, default="outputs")
-    p.add_argument("--workers", type=int, default=0)
+    p.add_argument("--workers", type=int, default=2, help="DataLoader 进程数（Windows 上 0/2 较稳）")
     p.add_argument("--no-download", action="store_true", help="禁止联网下载 MNIST")
     p.add_argument("--eval-only", action="store_true", help="只评估已有权重")
     p.add_argument("--ckpt", type=str, default="outputs/mnist_cnn.pt")
@@ -506,7 +544,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.eval_only:
         device = pick_device(args.device)
-        _, test_ds, source = load_mnist(args.data, download=False)
+        _, test_ds, source = load_mnist(args.data, download=False, augment=False)
         loader = DataLoader(test_ds, batch_size=512, shuffle=False)
         model = MNISTCNN().to(device)
         model.load_state_dict(load_checkpoint(args.ckpt, device)["model"])
