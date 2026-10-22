@@ -1,0 +1,9 @@
+# PyTorch 版（cnn_mnist_torch.py / predict_my_digit.py）
+# 有 NVIDIA 显卡时换成对应 CUDA 版本：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.0
+torchvision>=0.15
+
+# NumPy 版与自检脚本（cnn_numpy.py / smoke_test.py / verify_torch_arch.py）只需要这两个
+numpy
+Pillow
