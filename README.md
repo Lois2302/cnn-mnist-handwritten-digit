@@ -73,9 +73,18 @@ epoch  5/5 | train loss 0.3556 acc 0.9895 | val loss 0.0478 acc 0.9953 | lr 0.00
 （写成 `β` 形的 8、糊成一团的 7、缺笔画的 2），没有把清清楚楚的数字认错。
 这正是模型健康、99.53% 可信的证据。
 
+![训练曲线](outputs/torch_history.png)
+
+![预测样例](outputs/torch_predictions.png)
+
+![混淆矩阵](outputs/torch_confusion.png)
+
+![判错样例](outputs/torch_errors.png)
+
 **与 NumPy 字体版的对比**：同一个「写成 S 形的 5」，
 字体版模型以 92.2% 的置信度认成 **8**，真实 MNIST 版以 98.7% 认成 **5**。
 这就是"训练数据分布是否匹配"的差别。
+
 
 ### 网络结构
 
