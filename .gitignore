@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 训练产物：权重文件体积大，可自行训练生成，不入库
+outputs/*.pt
+outputs/*.npz
+
+# MNIST 数据集（首次运行由 torchvision 自动下载，约 11 MB）
+data/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器
+.idea/
+.vscode/
+
+# 系统
+.DS_Store
+Thumbs.db
